@@ -829,7 +829,12 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
 
         // clear the address flag, will stop the clock stretching.
         // this should only be done after the dma transfer has been set up.
-        info.regs.icr().modify(|reg| reg.set_addrcf(true));
+        // clear any flags that might have stuck around from writing
+        info.regs.icr().modify(|reg| {
+            reg.set_stopcf(true);
+            reg.set_nackcf(true);
+            reg.set_addrcf(true);
+        });
     }
 
     // A blocking read operation
@@ -842,7 +847,9 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
         };
         let last_chunk_idx = total_chunks.saturating_sub(1);
         for (number, chunk) in read.chunks_mut(255).enumerate() {
-            if number != 0 {
+            if number == 0 {
+                Self::slave_start(self.info, chunk.len(), number != last_chunk_idx);
+            } else {
                 Self::reload(self.info, chunk.len(), number != last_chunk_idx, timeout)?;
             }
 
@@ -868,7 +875,9 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
         let last_chunk_idx = total_chunks.saturating_sub(1);
 
         for (number, chunk) in write.chunks(255).enumerate() {
-            if number != 0 {
+            if number == 0 {
+                Self::slave_start(self.info, chunk.len(), number != last_chunk_idx);
+            } else {
                 Self::reload(self.info, chunk.len(), number != last_chunk_idx, timeout)?;
             }
 
@@ -876,8 +885,13 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
                 // Wait until we are allowed to send data
                 // (START has been ACKed or last byte when
                 // through)
-                self.wait_txe(timeout)?;
-
+                match self.wait_txe(timeout) {
+                    Ok(_) => {}
+                    Err(Error::Timeout) => {}
+                    Err(e) => {
+                        defmt::error!("I2C internal write error: {}", e)
+                    }
+                }
                 self.info.regs.txdr().write(|w| w.set_txdata(*byte));
             }
         }
