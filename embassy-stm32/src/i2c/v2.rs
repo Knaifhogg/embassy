@@ -838,7 +838,7 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
     }
 
     // A blocking read operation
-    fn slave_read_internal(&self, read: &mut [u8], timeout: Timeout) -> Result<(), Error> {
+    fn slave_read_internal(&self, read: &mut [u8], timeout: Timeout) -> Result<usize, Error> {
         let completed_chunks = read.len() / 255;
         let total_chunks = if completed_chunks * 255 == read.len() {
             completed_chunks
@@ -846,6 +846,8 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
             completed_chunks + 1
         };
         let last_chunk_idx = total_chunks.saturating_sub(1);
+        let total_len = read.len();
+        let mut remaining_len = total_len;
         for (number, chunk) in read.chunks_mut(255).enumerate() {
             if number == 0 {
                 Self::slave_start(self.info, chunk.len(), number != last_chunk_idx);
@@ -855,13 +857,18 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
 
             for byte in chunk {
                 // Wait until we have received something
-                self.wait_rxne(timeout)?;
+                match self.wait_rxne(timeout) {
+                    Ok(_) => {}
+                    Err(Error::Timeout) => return Ok(total_len - remaining_len),
+                    Err(e) => return Err(e),
+                };
 
                 *byte = self.info.regs.rxdr().read().rxdata();
+                remaining_len = remaining_len.saturating_sub(1);
             }
         }
 
-        Ok(())
+        Ok(total_len)
     }
 
     // A blocking write operation
@@ -888,9 +895,7 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
                 match self.wait_txe(timeout) {
                     Ok(_) => {}
                     Err(Error::Timeout) => {}
-                    Err(e) => {
-                        defmt::error!("I2C internal write error: {}", e)
-                    }
+                    Err(e) => return Err(e),
                 }
                 self.info.regs.txdr().write(|w| w.set_txdata(*byte));
             }
@@ -931,7 +936,7 @@ impl<'d, M: Mode> I2c<'d, M, MultiMaster> {
     }
 
     /// Respond to a write command.
-    pub fn blocking_respond_to_write(&self, read: &mut [u8]) -> Result<(), Error> {
+    pub fn blocking_respond_to_write(&self, read: &mut [u8]) -> Result<usize, Error> {
         let timeout = self.timeout();
         self.slave_read_internal(read, timeout)
     }
